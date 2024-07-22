@@ -1,8 +1,8 @@
 import torch
 from einops import rearrange
-from torch_scatter import scatter
 import rp
 from rp import as_torch_image, display_image, load_image, torch_resize_image
+from icecream import ic
 
 def unique_pixels(image):
     """
@@ -73,8 +73,11 @@ def sum_indexed_values(image, index_matrix):
     # Flatten the image tensor to [h*w, c]
     flattened_pixels = rearrange(pixels, "h w c -> (h w) c")
 
+    # Create an output tensor of shape [u, c] initialized with zeros
+    output = torch.zeros((u, c), dtype=flattened_pixels.dtype, device=flattened_pixels.device)
+
     # Scatter sum the flattened pixel values using the index matrix
-    output = scatter(flattened_pixels, index_matrix.view(-1), dim=0, dim_size=u, reduce="sum")
+    output.index_add_(0, index_matrix.view(-1), flattened_pixels)
 
     # Assert the shapes of the input and output tensors
     assert image.shape == (c, h, w), f"Expected image shape: ({c}, {h}, {w}), but got: {image.shape}"
@@ -82,7 +85,6 @@ def sum_indexed_values(image, index_matrix):
     assert output.shape == (u, c), f"Expected output shape: ({u}, {c}), but got: {output.shape}"
 
     return output
-
 
 def indexed_to_image(index_matrix, unique_colors):
     """
@@ -172,6 +174,27 @@ def calculate_wave_pattern(h, w, frame):
     
     return dx, dy
 
+def starfield_zoom(h, w, frame):
+    # Create a grid of coordinates
+    y, x = torch.meshgrid(torch.arange(h), torch.arange(w))
+    
+    # Calculate the distance from the center of the image
+    center_x, center_y = w // 2, h // 2
+    dist_from_center = torch.sqrt((x - center_x)**2 + (y - center_y)**2)
+    
+    # Calculate the angle from the center of the image
+    angle_from_center = torch.atan2(y - center_y, x - center_x)
+    
+    # Calculate the starfield zoom effect
+    zoom_speed = 0.01  # Speed of the zoom effect
+    zoom_scale = 1.0 + frame * zoom_speed  # Scale factor for the zoom effect
+    
+    # Calculate the displacement based on the distance and angle
+    dx = dist_from_center * torch.cos(angle_from_center) / zoom_scale
+    dy = dist_from_center * torch.sin(angle_from_center) / zoom_scale
+    
+    return dx, dy
+
 def warp_noise(noise, dx, dy, s=4):
     #This is *certainly* imperfect. We need to have particle swarm in addition to this.
 
@@ -243,16 +266,130 @@ def warp_noise(noise, dx, dy, s=4):
     return output
     
 def demo_noise_warp():
+    d=rp.JupyterDisplayChannel()
+    d.display()
+    device='cuda'
     h=w=256
-    noise=torch.randn(3,h,w)
-    dx,dy=calculate_wave_pattern(h,w,frame=0)
+    noise=torch.randn(3,h,w).to(device)
+    wdx,wdy=calculate_wave_pattern(h,w,frame=0)
+    sdx,sdy=starfield_zoom(h,w,frame=1)
+
+    dx=sdx+2*wdx
+    dy=sdy+2*wdy
+    
     dx/=dx.max()
     dy/=dy.max()
+    Q=-6
+    dy*=Q
+    dx*=Q
+    dx=dx.to(device)
+    dy=dy.to(device)
     new_noise=noise
-    for _ in range(100):
-        new_noise=warp_noise(new_noise,dx,dy)
-        display_image(new_noise)
+
+
+    for _ in range(10000):
+        # ic(new_noise.device,dx.device,dy.device)
+
+        new_noise=warp_noise(new_noise,dx,dy,2)
+        # display_image(new_noise)
+        d.update(rp.as_numpy_image(new_noise/4+.5))
+
+
+def webcam_demo():
+    import cv2
+    import numpy as np
     
-
-
-
+    def draw_hsv(flow, scale=8):
+        h, w = flow.shape[:2]
+        hsv = np.zeros((h, w, 3), dtype=np.uint8)
+        mag, ang = cv2.cartToPolar(flow[..., 0], flow[..., 1])
+        hsv[..., 0] = ang * 180 / np.pi / 2
+        hsv[..., 1] = 255
+        scaled_mag = mag * scale
+        scaled_mag = np.clip(scaled_mag, 0, 255)  # Ensure it fits in the value range
+        hsv[..., 2] = scaled_mag.astype(np.uint8)
+        bgr = cv2.cvtColor(hsv, cv2.COLOR_HSV2BGR)
+        return bgr
+    
+    def resize_frame(frame, target_height=128):
+        aspect_ratio = frame.shape[1] / frame.shape[0]
+        target_width = int(target_height * aspect_ratio)
+        resized_frame = cv2.resize(frame, (target_width, target_height))
+        return resized_frame
+    
+    def main():
+        cap = cv2.VideoCapture(0)
+        ret, prev_frame = cap.read()
+        prev_frame = resize_frame(prev_frame)
+        prev_gray = cv2.cvtColor(prev_frame, cv2.COLOR_BGR2GRAY)
+    
+        # Initialize DeepFlow Optical Flow
+        optical_flow = cv2.optflow.createOptFlow_DeepFlow()
+    
+    
+        d=rp.JupyterDisplayChannel()
+        d.display()
+        device='cpu'
+        h,w=get_image_dimensions(prev_frame)
+        noise=torch.randn(3,h,w).to(device)
+        wdx,wdy=calculate_wave_pattern(h,w,frame=0)
+        sdx,sdy=starfield_zoom(h,w,frame=1)
+    
+        dx=sdx+2*wdx
+        dy=sdy+2*wdy
+        
+        dx/=dx.max()
+        dy/=dy.max()
+        Q=-6
+        dy*=Q
+        dx*=Q
+        dx=dx.to(device)
+        dy=dy.to(device)
+        new_noise=noise
+    
+    
+    
+    
+        while True:
+            ret, frame = cap.read()
+            frame = resize_frame(frame)
+            frame_gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+    
+            # Compute the optical flow
+            flow = optical_flow.calc(prev_gray, frame_gray, None)
+    
+            # Visualization
+            flow_bgr = draw_hsv(flow)
+    
+            x=flow[:,:,0]
+            y=flow[:,:,1]
+    
+            dx=-torch.Tensor(x)
+            dy=-torch.Tensor(y)
+            
+            # Display the original and flow side by side
+            combined_img = np.hstack((frame, flow_bgr))
+            cv2.imshow('Frame and Optical Flow', combined_img)
+            
+            prev_gray = frame_gray.copy()
+    
+            if cv2.waitKey(1) & 0xFF == ord('q'):
+                break
+    
+            new_noise=warp_noise(new_noise,dx,dy,1)
+            display_image(
+                tiled_images(
+                    [
+                        as_numpy_image(new_noise / 2 + 0.5),
+                        cv_bgr_rgb_swap(frame),
+                        cv_bgr_rgb_swap(flow_bgr),
+                    ]
+                )
+            )
+    
+            # d.update(rp.as_numpy_image(new_noise/4+.5))
+    
+        cap.release()
+        cv2.destroyAllWindows()
+    
+    main()
