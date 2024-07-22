@@ -295,9 +295,20 @@ def demo_noise_warp():
         d.update(rp.as_numpy_image(new_noise/4+.5))
 
 
+
+
+
 def webcam_demo():
     import cv2
     import numpy as np
+    
+    def get_all_frames():
+        while True:
+            yield resize_frame(load_image_from_webcam())
+    def get_all_frames():
+        yield from load_video_stream('outputs/water/output_Recons_bliniear.mp4')
+    frames=map(cv_bgr_rgb_swap,get_all_frames())
+        
     
     def draw_hsv(flow, scale=8):
         h, w = flow.shape[:2]
@@ -318,9 +329,7 @@ def webcam_demo():
         return resized_frame
     
     def main():
-        cap = cv2.VideoCapture(0)
-        ret, prev_frame = cap.read()
-        prev_frame = resize_frame(prev_frame)
+        prev_frame = next(frames)
         prev_gray = cv2.cvtColor(prev_frame, cv2.COLOR_BGR2GRAY)
     
         # Initialize DeepFlow Optical Flow
@@ -347,49 +356,55 @@ def webcam_demo():
         dy=dy.to(device)
         new_noise=noise
     
+        out_frames=[]
     
     
-    
-        while True:
-            ret, frame = cap.read()
-            frame = resize_frame(frame)
-            frame_gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-    
-            # Compute the optical flow
-            flow = optical_flow.calc(prev_gray, frame_gray, None)
-    
-            # Visualization
-            flow_bgr = draw_hsv(flow)
-    
-            x=flow[:,:,0]
-            y=flow[:,:,1]
-    
-            dx=-torch.Tensor(x)
-            dy=-torch.Tensor(y)
-            
-            # Display the original and flow side by side
-            combined_img = np.hstack((frame, flow_bgr))
-            cv2.imshow('Frame and Optical Flow', combined_img)
-            
-            prev_gray = frame_gray.copy()
-    
-            if cv2.waitKey(1) & 0xFF == ord('q'):
-                break
-    
-            new_noise=warp_noise(new_noise,dx,dy,1)
-            display_image(
-                tiled_images(
-                    [
-                        as_numpy_image(new_noise / 2 + 0.5),
-                        cv_bgr_rgb_swap(frame),
-                        cv_bgr_rgb_swap(flow_bgr),
-                    ]
+        try:
+            for i,frame in enumerate(frames):
+                
+                frame_gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        
+                # Compute the optical flow
+                flow = optical_flow.calc(prev_gray, frame_gray, None)
+        
+                # Visualization
+                flow_bgr = draw_hsv(flow)
+        
+                x=flow[:,:,0]
+                y=flow[:,:,1]
+        
+                dx=-torch.Tensor(x)
+                dy=-torch.Tensor(y)
+                
+                # Display the original and flow side by side
+                combined_img = np.hstack((frame, flow_bgr))
+                cv2.imshow('Frame and Optical Flow', combined_img)
+                
+                prev_gray = frame_gray.copy()
+        
+                if cv2.waitKey(1) & 0xFF == ord('q'):
+                    break
+        
+                new_noise=warp_noise(new_noise,dx,dy,6)
+                display_out = (
+                    tiled_images(
+                        labeled_images([
+                            as_numpy_image(new_noise / 2 + 0.5),
+                            cv_bgr_rgb_swap(frame),
+                            cv_bgr_rgb_swap(flow_bgr),
+                            as_numpy_image(new_noise / 5) + as_float_image(cv_bgr_rgb_swap(frame)),
+                        ],['Warped Noise','Input Video','Optical Flow','Overlaid'])
+                    )
                 )
-            )
+                display_image(display_out)
+                out_frames.append(display_out)
+                
+        
+                # d.update(rp.as_numpy_image(new_noise/4+.5))
+        except KeyboardInterrupt:
+            print("Interrupted! Returning %i frames"%len(out_frames))
+            pass
     
-            # d.update(rp.as_numpy_image(new_noise/4+.5))
+        return as_numpy_array(out_frames)
     
-        cap.release()
-        cv2.destroyAllWindows()
-    
-    main()
+    return main()
