@@ -1,8 +1,8 @@
 import torch
-import torch.nn.functional as F
 from einops import rearrange
 from torch_scatter import scatter
-
+import rp
+from rp import as_torch_image, display_image, load_image, torch_resize_image
 
 def unique_pixels(image):
     """
@@ -38,9 +38,11 @@ def unique_pixels(image):
     index_matrix = rearrange(inverse_indices, "(h w) -> h w", h=h, w=w)
 
     # Assert the shapes of the output tensors
-    assert unique_colors.shape == (u, c), f"Expected unique_colors shape: ({u}, {c}), but got: {unique_colors.shape}"
-    assert counts.shape == (u,), f"Expected counts shape: ({u},), but got: {counts.shape}"
-    assert index_matrix.shape == (h, w), f"Expected index_matrix shape: ({h}, {w}), but got: {index_matrix.shape}"
+    assert unique_colors.shape == (u, c)
+    assert counts.shape == (u,)
+    assert index_matrix.shape == (h, w)
+    assert index_matrix.min() == 0
+    assert index_matrix.max() == u - 1
 
     return unique_colors, counts, index_matrix
 
@@ -148,33 +150,81 @@ def demo_pixellation_via_proxy():
     pixelated_dog_image = indexed_to_image(index_matrix, average_colors)
 
     display_image(pixelated_dog_image)
+    
+def calculate_wave_pattern(h, w, frame):
+    # Create a grid of coordinates
+    y, x = torch.meshgrid(torch.arange(h), torch.arange(w))
+    
+    # Calculate the distance from the center of the image
+    center_x, center_y = w // 2, h // 2
+    dist_from_center = torch.sqrt((x - center_x)**2 + (y - center_y)**2)
+    
+    # Calculate the angle from the center of the image
+    angle_from_center = torch.atan2(y - center_y, x - center_x)
+    
+    # Calculate the wave pattern based on the distance and angle
+    wave_freq = 0.05  # Frequency of the waves
+    wave_amp = 10.0   # Amplitude of the waves
+    wave_offset = frame * 0.05  # Offset for animation
+    
+    dx = wave_amp * torch.cos(dist_from_center * wave_freq + angle_from_center + wave_offset)
+    dy = wave_amp * torch.sin(dist_from_center * wave_freq + angle_from_center + wave_offset)
+    
+    return dx, dy
 
-def demo():
-    real_image = as_torch_image(
-        rp.cv_resize_image(
-            load_image("https://i.natgeofe.com/n/4f5aaece-3300-41a4-b2a8-ed2708a0a27c/domestic-dog_thumb_square.jpg"),
-            (512, 512),
-        )
-    )
+def demo_gaussianize():
+    c, h, w = 3, 128, 128
+    s = 4  # scaling factor
+    hs = h * s
+    ws = w * s
 
-    c, h, w = real_image.shape
+    noise = torch.randn(c, h, w)
 
-    noise_image = torch.randn(c, h // 4, w // 4)
-
-    # Resize noise_image using nearest-neighbor interpolation to match the dimensions of real_image
-    pixelated_noise_image = torch_resize_image(noise_image, 4, "nearest")
-    assert pixelated_noise_image.shape==(c,h,w)
+    up_noise = rp.torch_resize_image(noise, (hs, ws), interp="nearest")
+    assert up_noise.shape == (c, hs, ws)
 
     # Find unique pixel values, their indices, and counts in the pixelated noise image
-    unique_colors, counts, index_matrix = unique_pixels(pixelated_noise_image)
+    unique_colors, counts, index_matrix = unique_pixels(up_noise)
+    u = len(unique_colors)
+    assert unique_colors.shape == (u, c)
+    assert counts.shape == (u,)
+    assert index_matrix.max() == u - 1
+    assert index_matrix.min() == 0
+    assert index_matrix.shape == (hs, ws)
 
-    # Sum the color values from real_image based on the indices of the unique noise pixels
-    summed_colors = sum_indexed_values(real_image, index_matrix)
+    foreign_noise = torch.randn(up_noise.shape)
+    assert foreign_noise.shape == up_noise.shape == (c, hs, ws)
 
-    # Divide the summed color values by the counts to get the average color for each unique pixel
-    average_colors = summed_colors / rearrange(counts, "u -> u 1")
+    summed_foreign_noise_colors = sum_indexed_values(foreign_noise, index_matrix)
+    assert summed_foreign_noise_colors.shape == (u, c)
 
-    # Create a new pixelated image using the average colors and the index matrix
-    pixelated_dog_image = indexed_to_image(index_matrix, average_colors)
+    meaned_foreign_noise_colors = summed_foreign_noise_colors / counts
+    assert meaned_foreign_noise_colors.shape == (u, c)
 
-    display_image(pixelated_dog_image)
+    meaned_foreign_noise = indexed_to_image(index_matrix, meaned_foreign_noise_colors)
+    assert meaned_foreign_noise.shape == (c, hs, ws)
+
+    zeroed_foreign_noise = foreign_noise - meaned_foreign_noise
+    assert zeroed_foreign_noise == (c, hs, ws)
+
+    counts_as_colors = rearrange(counts, "u -> u 1")
+    counts_image = indexed_to_image(index_matrix, counts_as_colors)
+    assert counts_image.shape == (1, hs, ws)
+
+    #To upsample noise, we must first divide by the area then add zero-sum-noise
+    output = up_noise
+    output = output / counts_image ** .5
+    output = output + zeroed_foreign_noise
+
+    #Now we resample the noise back down again
+    #PLEASE HOPE AREA DOWNSAMPLING WORKS PROPERLY...UNVERIFIED...I think I remember it not working?
+    output = rp.torch_resize_image(output, (h, w), interp='area')
+    output = output * s #Adjust variance by multiplying by sqrt of area, aka sqrt(s*s)=s
+
+    return output
+    
+
+    
+
+
+
