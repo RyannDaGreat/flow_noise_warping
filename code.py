@@ -172,15 +172,34 @@ def calculate_wave_pattern(h, w, frame):
     
     return dx, dy
 
-def demo_gaussianize():
-    c, h, w = 3, 128, 128
-    s = 4  # scaling factor
+def warp_noise(noise, dx, dy, s=4):
+    #This is *certainly* imperfect. We need to have particle swarm in addition to this.
+
+    c, h, w = noise.shape
+    assert dx.shape==(h,w)
+    assert dy.shape==(h,w)
+
+    #s is scaling factor
     hs = h * s
     ws = w * s
-
-    noise = torch.randn(c, h, w)
+    
+    #Upscale the warping with linear interpolation. Also scale it appropriately.
+    up_dx = rp.torch_resize_image(dx[None], (hs, ws), interp="bilinear")[0]
+    up_dy = rp.torch_resize_image(dy[None], (hs, ws), interp="bilinear")[0]
+    up_dx *= s
+    up_dy *= s
 
     up_noise = rp.torch_resize_image(noise, (hs, ws), interp="nearest")
+    assert up_noise.shape == (c, hs, ws)
+
+    up_noise = rp.torch_remap_image(up_noise, up_dx, up_dy, relative=True, interp="nearest", add_alpha_mask=True)
+    up_noise, alpha = up_noise[:-1], up_noise[-1:]
+    assert up_noise.shape == (c, hs, ws)
+    assert alpha.shape == (1, hs, ws)
+    
+    # Fill occluded regions with noise...
+    fill_noise = torch.randn_like(up_noise)
+    up_noise = up_noise * alpha + fill_noise * (1-alpha)
     assert up_noise.shape == (c, hs, ws)
 
     # Find unique pixel values, their indices, and counts in the pixelated noise image
@@ -192,20 +211,20 @@ def demo_gaussianize():
     assert index_matrix.min() == 0
     assert index_matrix.shape == (hs, ws)
 
-    foreign_noise = torch.randn(up_noise.shape)
+    foreign_noise = torch.randn_like(up_noise)
     assert foreign_noise.shape == up_noise.shape == (c, hs, ws)
 
     summed_foreign_noise_colors = sum_indexed_values(foreign_noise, index_matrix)
     assert summed_foreign_noise_colors.shape == (u, c)
 
-    meaned_foreign_noise_colors = summed_foreign_noise_colors / counts
+    meaned_foreign_noise_colors = summed_foreign_noise_colors / rearrange(counts, "u -> u 1")
     assert meaned_foreign_noise_colors.shape == (u, c)
 
     meaned_foreign_noise = indexed_to_image(index_matrix, meaned_foreign_noise_colors)
     assert meaned_foreign_noise.shape == (c, hs, ws)
 
     zeroed_foreign_noise = foreign_noise - meaned_foreign_noise
-    assert zeroed_foreign_noise == (c, hs, ws)
+    assert zeroed_foreign_noise.shape == (c, hs, ws)
 
     counts_as_colors = rearrange(counts, "u -> u 1")
     counts_image = indexed_to_image(index_matrix, counts_as_colors)
@@ -223,7 +242,16 @@ def demo_gaussianize():
 
     return output
     
-
+def demo_noise_warp():
+    h=w=256
+    noise=torch.randn(3,h,w)
+    dx,dy=calculate_wave_pattern(h,w,frame=0)
+    dx/=dx.max()
+    dy/=dy.max()
+    new_noise=noise
+    for _ in range(100):
+        new_noise=warp_noise(new_noise,dx,dy)
+        display_image(new_noise)
     
 
 
