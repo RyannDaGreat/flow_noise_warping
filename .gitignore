@@ -1,1 +1,3 @@
 flow_noise_warping_outputs/outputs
+outputs
+__pycache__
